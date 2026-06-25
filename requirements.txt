@@ -1,0 +1,7 @@
+kafka-python
+dask[complete]
+distributed
+boto3
+numpy
+pandas
+bokeh
