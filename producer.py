@@ -2,13 +2,20 @@ import os
 import time
 import json
 import struct
+import argparse
 import boto3
 import numpy as np
 import gc
 import urllib3
-from confluent_kafka import Producer  
+from confluent_kafka import Producer
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# --- CLI CONFIGURATION ---
+parser = argparse.ArgumentParser(description="QUAX Custom Bare-Metal Rate-Tweakable Producer")
+parser.add_argument("--rate", type=float, default=16.0, help="Target streaming rate in MB/s")
+parser.add_argument("--output", type=str, default="producer_metric_report.json", help="Path to save execution JSON report")
+args = parser.parse_args()
 
 ACCESS_KEY = os.environ.get('S3_ACCESS_KEY')
 SECRET_KEY = os.environ.get('S3_SECRET_KEY')
@@ -17,8 +24,7 @@ BUCKET_NAME = os.environ.get('S3_BUCKET_NAME')
 KAFKA_BOOTSTRAP_SERVERS = os.environ.get('KAFKA_BOOTSTRAP_SERVERS', '10.67.22.134:9092')
 TOPIC = 'topic_stream'
 
-# Tweakable streaming rate in Megabytes per second (default 16.0 MB/s)
-TARGET_RATE_MB_S = float(os.environ.get('STREAM_RATE_MB_S', '16.0'))
+TARGET_RATE_MB_S = args.rate
 
 print(f"[INFO] Connecting to CloudVeneto S3 at {ENDPOINT_URL}...")
 s3_client = boto3.client(
@@ -30,7 +36,6 @@ s3_client = boto3.client(
 )
 
 print(f"[INFO] Connecting to Kafka via confluent-kafka (C-Optimized)...")
-
 conf = {
     'bootstrap.servers': KAFKA_BOOTSTRAP_SERVERS,
     'message.max.bytes': 10485760,  # 10MB max message
@@ -40,11 +45,18 @@ conf = {
 }
 producer = Producer(conf)
 
+# --- METRIC COLLECTION DICTIONARY ---
+execution_report = {
+    "target_rate_mb_s": TARGET_RATE_MB_S,
+    "file_metrics": []
+}
+
+# Run through the data files
 for file_index in range(31):
     file_id = f"duck_{file_index:05d}"
     key_i = f"duck_i_{file_index:05d}.dat"
     key_q = f"duck_q_{file_index:05d}.dat"
-    
+
     print(f"\n[INFO] Fetching {file_id} directly from Cloud S3 bucket '{BUCKET_NAME}'...")
 
     try:
@@ -72,7 +84,7 @@ for file_index in range(31):
         print(f"[INFO] Total scans to transmit: {total_scans}. Pacing stream at {TARGET_RATE_MB_S} MB/s...")
 
         t_kafka_start = time.perf_counter()
-        bytes_sent = 0  # Track exactly how much data has hit the network
+        bytes_sent = 0  
         
         for scan_id in range(1, total_scans + 1):
             start_idx = (scan_id - 1) * chunk_size
@@ -95,30 +107,32 @@ for file_index in range(31):
             producer.produce(TOPIC, value=payload)
             producer.poll(0)  
 
-            # --- THE NEW THROTTLE LOGIC ---
             bytes_sent += len(payload)
             
-            # Calculate how much time SHOULD have passed to send this much data
+            # Precise pacing calculations
             expected_time = bytes_sent / (TARGET_RATE_MB_S * 1024 * 1024)
-            
-            # Check how much time HAS actually passed
             elapsed_time = time.perf_counter() - t_kafka_start
             
-            # If we are running too fast, force the CPU to sleep to maintain the exact rate
             if elapsed_time < expected_time:
                 time.sleep(expected_time - elapsed_time)
-            # ------------------------------
-
-            if scan_id % max(1, (total_scans // 10)) == 0:
-                print(f"  -> Queued {scan_id / total_scans * 100:.1f}% inside producer buffer...")
 
         print(f"[INFO] Flushing C-ring buffer directly to VM2 over the network...")
         producer.flush()
         
         t_kafka_end = time.perf_counter()
+        duration = t_kafka_end - t_kafka_start
+        actual_throughput = (bytes_sent / (1024 * 1024)) / duration
         
-        print(f"[METRIC] Kafka Network Streaming took: {t_kafka_end - t_kafka_start:.4f} seconds")
-        print(f"[SUCCESS] {file_id} fully written to broker disk pipeline.")
+        # Append stats to our metrics report database
+        execution_report["file_metrics"].append({
+            "file_id": file_id,
+            "total_bytes_sent": bytes_sent,
+            "duration_seconds": duration,
+            "actual_throughput_mb_s": actual_throughput
+        })
+
+        print(f"[METRIC] Kafka Network Streaming took: {duration:.4f} seconds")
+        print(f"[SUCCESS] {file_id} fully written to broker disk pipeline. Real Speed: {actual_throughput:.2f} MB/s")
 
     except Exception as e:
         print(f"[ERROR] Failed to execute lifecycle loop for {file_id}: {type(e).__name__}: {e}")
@@ -130,4 +144,7 @@ for file_index in range(31):
         if 'data_q' in locals(): del data_q
         gc.collect()
 
-print("\n[INFO] All files transmitted. Producer shutting down.")
+# --- SAVE OUTPUT DICTIONARY ---
+with open(args.output, "w") as f:
+    json.dump(execution_report, f, indent=4)
+print(f"\n[INFO] All files transmitted. Metric logs exported to: {args.output}")
