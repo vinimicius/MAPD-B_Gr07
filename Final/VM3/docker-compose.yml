@@ -1,8 +1,0 @@
-services:
-  processor:
-    build: .
-    volumes:
-      - ./:/app 
-    environment:
-      # CRITICAL: Change this to your actual VM2 IP address!
-      - KAFKA_BOOTSTRAP_SERVERS=10.67.22.212:9092
