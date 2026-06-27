@@ -14,8 +14,8 @@ from distributed import Client
 # ==========================================
 # 1. CONFIGURATION & CLUSTER PARAMETERS
 # ==========================================
-DASK_SCHEDULER = 'tcp://10.67.22.72:8786'
-KAFKA_BROKER = '10.67.22.134:9092'
+DASK_SCHEDULER = 'tcp://10.67.22.72:8786' #VM3
+KAFKA_BROKER = '10.67.22.134:9092'        #VM2
 TOPIC_INPUT = 'topic_stream'
 TOPIC_RESULTS = 'topic_results'
 SAMPLE_RATE = 20e6
@@ -29,16 +29,18 @@ SNAPSHOT_EVERY_N_CHUNKS = int(os.environ.get('SNAPSHOT_EVERY_N_CHUNKS', '50'))
 # ==========================================
 def compute_fft(chunk_i, chunk_q):
     """
-    Executa remotamente em VM3/VM4/VM5. Recebe arrays numpy float32 diretamente
-    (sem conversão para lista), e devolve também os timestamps de início/fim
-    do cálculo puro (relógio do worker) para isolar o tempo de serviço.
+    This function executes remotely inside the RAM of VM4 and VM5.
+    It takes lists of numbers, builds complex numbers, and computes the power spectrum.
     """
     import numpy as np
     import time
 
     compute_start = time.time()
+    # Reconstruct complex signal vector: V = I + j*Q
     complex_signal = chunk_i + 1j * chunk_q
+    # Run the raw Fast Fourier Transform
     fft_output = np.fft.fft(complex_signal)
+    # Calculate Power Intensity Magnitude Squared
     power_spectrum = np.abs(fft_output) ** 2
     compute_end = time.time()
 
@@ -46,7 +48,7 @@ def compute_fft(chunk_i, chunk_q):
 
 
 # ==========================================
-# 3. ESTATÍSTICAS ONLINE (WELFORD)
+# 3. ONLINE STATISTICS (WELFORD)
 # ==========================================
 def new_latency_stats():
     return {"count": 0, "mean": 0.0, "M2": 0.0, "max": float("-inf"), "min": float("inf")}
@@ -86,8 +88,7 @@ def compute_consumer_lag(consumer, partition_offsets):
 
 
 # ==========================================
-# 4. CALLBACK DE CONCLUSÃO
-# (substitui o scan O(N^2) que existia no laço principal)
+# 4. CONCLUSION CALLBACK
 # ==========================================
 def handle_done(future, results_queue, active_futures, send_time, submit_time):
     try:
@@ -95,13 +96,13 @@ def handle_done(future, results_queue, active_futures, send_time, submit_time):
         harvest_time = time.time()
         results_queue.put((psd_result, send_time, submit_time, compute_start, compute_end, harvest_time))
     except Exception as e:
-        print(f"[WARNING] Future falhou: {e}")
+        print(f"[WARNING] Future failed: {e}")
     finally:
         active_futures.discard(future)
 
 
 # ==========================================
-# 5. ORQUESTRAÇÃO PRINCIPAL
+# 5. CORE ORCHESTRATION PIPELINE
 # ==========================================
 def main():
     print(f"[INFO] Connecting to Dask Scheduler at {DASK_SCHEDULER}...")
@@ -113,6 +114,7 @@ def main():
         print(f"[ERROR] Dask Master initialization failed: {e}")
         sys.exit(1)
 
+ # --- Initialize Resilient Kafka Consumer ---
     consumer = Consumer({
         'bootstrap.servers': KAFKA_BROKER,
         'group.id': f'dask-processor-{RUN_ID}',
@@ -122,12 +124,14 @@ def main():
     })
     consumer.subscribe([TOPIC_INPUT])
 
+# --- Initialize Kafka Results Producer ---
     producer = Producer({
         'bootstrap.servers': KAFKA_BROKER,
         'linger.ms': 10,
         'message.max.bytes': 50000000
     })
 
+ # --- Delivery Callback to Catch Silent Errors ---
     def delivery_report(err, msg):
         if err is not None:
             print(f"[ERROR] Message delivery failed: {err}")
@@ -135,11 +139,11 @@ def main():
     print(f"[INFO] Connecting to Kafka Broker at {KAFKA_BROKER}...")
     print("[INFO] Pipeline listening for incoming data stream...")
 
-    # --- Estado da pipeline ---
-    active_futures = set()         # mantém referência forte às futures pendentes
-                                    # (Dask cancela/libera futures sem referência ativa)
-    results_queue = queue.Queue()  # alimentada pelos callbacks; drenada pelo laço principal
-                                    # custo O(1) por item, sem escanear pendentes
+    # --- Pipeline State Tracking ---
+    active_futures = set()         # keep references to futures 
+                                    # Dask cancels/releases futures without reference 
+    results_queue = queue.Queue()  # Feed by callbacks; drained by main loop
+                                    # cost O(1) per item, without scanning pending
 
     global_average = None
     total_processed = 0
@@ -147,18 +151,18 @@ def main():
     end_signal_partitions = set()
     stream_ended = False
 
-    end_to_end_stats = new_latency_stats()       # send_time -> harvest_time  (W, latência fim-a-fim)
-    queue_wait_stats = new_latency_stats()        # send_time -> submit_time  (espera em Kafka/laço)
-    dask_overhead_stats = new_latency_stats()     # submit_time -> compute_start (agendamento Dask)
-    service_time_stats = new_latency_stats()      # compute_start -> compute_end (S, tempo de processamento puro)
-    transit_stats = new_latency_stats()           # compute_end -> harvest_time (retorno do resultado)
+    end_to_end_stats = new_latency_stats()       # send_time -> harvest_time  (W, latency end-to-end)
+    queue_wait_stats = new_latency_stats()        # send_time -> submit_time  (wait in Kafka/loop)
+    dask_overhead_stats = new_latency_stats()     # submit_time -> compute_start 
+    service_time_stats = new_latency_stats()      # compute_start -> compute_end (processing time)
+    transit_stats = new_latency_stats()           # compute_end -> harvest_time (result return time)
 
     snapshots = []
     pipeline_start_time = time.time()
 
     try:
         while True:
-            # 1. Ingestão do Kafka
+            # 1. Kafka ingestion
             msg = consumer.poll(0.1)
 
             if msg is not None and not msg.error():
@@ -172,8 +176,8 @@ def main():
 
                     if header_data.get("event") == "END_OF_STREAM":
                         end_signal_partitions.add(msg.partition())
-                        print(f"[INFO] END_OF_STREAM na partição {msg.partition()} "
-                              f"({len(end_signal_partitions)} partições sinalizadas)")
+                        print(f"[INFO] END_OF_STREAM in partition {msg.partition()} "
+                              f"({len(end_signal_partitions)} partitions signaled)")
                     else:
                         n_samples = header_data["n_samples"]
                         float_bytes_len = n_samples * 4
@@ -182,7 +186,7 @@ def main():
                         start_q = end_i
                         end_q = start_q + float_bytes_len
 
-                        # Arrays numpy float32 diretos, sem .tolist() / np.array de volta no worker
+                        # Arrays numpy float32 straight from the payload, copied to avoid memory issues
                         chunk_i = np.frombuffer(payload_bytes[start_i:end_i], dtype=np.float32).copy()
                         chunk_q = np.frombuffer(payload_bytes[start_q:end_q], dtype=np.float32).copy()
 
@@ -200,7 +204,7 @@ def main():
                 except Exception as e:
                     print(f"[WARNING] Bypassed an unparseable frame packet: {e}")
 
-            # 2. Drena tudo que já terminou (custo O(1) por item)
+            # 2. Drains whats already over
             while True:
                 try:
                     psd_result, send_time, submit_time, compute_start, compute_end, harvest_time = \
@@ -256,14 +260,14 @@ def main():
                         "dask_active_tasks": dask_active_tasks,
                     })
 
-            # 3. Condição de parada: todas as partições sinalizaram fim, e nada pendente
+            # 3. Stop condition: all partitions signaled end, and nothing pending
             assignment = consumer.assignment()
             if (assignment
                     and len(end_signal_partitions) >= len(assignment)
                     and len(active_futures) == 0
                     and results_queue.empty()):
                 stream_ended = True
-                print("[INFO] Todas as partições sinalizaram fim de stream; fila de processamento vazia.")
+                print("[INFO] All partitions signaled end of stream; processing queue empty.")
                 break
 
     except KeyboardInterrupt:
@@ -300,4 +304,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
