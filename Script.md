@@ -39,6 +39,10 @@ This then gives a direct way to **calculate** $\mu_{\text{eff}}$ from the collec
 
 Follow until step 3 from README file
 
+Plus activate in the VM3, in another terminal afther the scheduler is working:
+python3 -m distributed.cli.dask_worker tcp://10.67.22.72:8786 --name worker-vm3
+This gives 3 workers instead of 2
+
 ### Trials table
 
 | Trial | `RUN_ID` | Partições `topic_stream` | `KAFKA_NUM_PARTITIONS` | `STREAM_RATE_MB_S` |
