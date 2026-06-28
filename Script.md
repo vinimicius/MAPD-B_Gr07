@@ -40,7 +40,10 @@ This then gives a direct way to **calculate** $\mu_{\text{eff}}$ from the collec
 Follow until step 3 from README file
 
 Plus activate in the VM3, in another terminal afther the scheduler is working:
+
+```bash
 python3 -m distributed.cli.dask_worker tcp://10.67.22.72:8786 --name worker-vm3
+```
 This gives 3 workers instead of 2
 
 ### Trials table
@@ -101,18 +104,11 @@ This will generate the following files:
 - VM3: `processing_metrics_<run_id>.pkl`
 
 To send to your local machine, run the following:
+```bash
 scp -J <your_user>@gate.cloudveneto.it -i ~/<path_to_your_.pem> ubuntu@10.67.22.42:/home/ubuntu/quax-pipeline/producer_metrics_partition_3part_rate16.pkl  /home/ubuntu/MAPD-B_Gr07/
 scp -J <your_user>@gate.cloudveneto.it -i ~/<path_to_your_.pem> ubuntu@10.67.22.72:/home/ubuntu/processing_metrics_partition_3part_rate16.pkl 
 /home/ubuntu/MAPD-B_Gr07/
-
+```
 Repeat Kafka reset + plus the commands for next trial.
 
-At the end, you'll have 10 '.pkl' files (5 producer + 5 processing). To use them later:
 
-```python
-import pickle
-with open("processing_metrics_rate_16mbps.pkl", "rb") as f:
-    r = pickle.load(f)
-r["latency_stats"]   # {"count":..., "mean_s":..., "std_s":..., ...}
-r["snapshots"][0]    # {"elapsed_s":..., "consumer_lag":..., "queue_depth":..., "dask_active_tasks":...}
-```
