@@ -101,7 +101,11 @@ bin/kafka-server-start.sh -daemon config/kraft/server.properties
 
 ### Virtual Machines IP adressess:
 VM1: 10.67.22.42
+
 VM2: 10.67.22.134
+
 VM3: 10.67.22.72
+
 VM4: 10.67.22.202
+
 VM5: 10.67.22.185
