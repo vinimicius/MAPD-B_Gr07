@@ -18,6 +18,7 @@ BUCKET_NAME = os.environ.get('S3_BUCKET_NAME')
 KAFKA_BOOTSTRAP_SERVERS = os.environ.get('KAFKA_BOOTSTRAP_SERVERS', '10.67.22.134:9092')
 TOPIC = 'topic_stream'
 
+# Tweakable streaming rate in Megabytes per second (default 16.0 MB/s)
 TARGET_RATE_MB_S = float(os.environ.get('STREAM_RATE_MB_S', '16.0'))
 KAFKA_NUM_PARTITIONS = int(os.environ.get('KAFKA_NUM_PARTITIONS', '1'))
 RUN_ID = os.environ.get('RUN_ID', 'default_run')
@@ -110,9 +111,13 @@ for file_index in range(31):
             producer.poll(0)
             msg_counter += 1
 
+            # --- THE NEW THROTTLE LOGIC --
             bytes_sent_file += len(payload)
+            # Calculate how much time SHOULD have passed to send this much data
             expected_time = bytes_sent_file / (TARGET_RATE_MB_S * 1024 * 1024)
+            # Check how much time HAS actually passed
             elapsed_time = time.perf_counter() - t_kafka_start
+             # If we are running too fast, force the CPU to sleep to maintain the exact rate
             if elapsed_time < expected_time:
                 time.sleep(expected_time - elapsed_time)
 

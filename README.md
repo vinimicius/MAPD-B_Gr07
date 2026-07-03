@@ -147,3 +147,13 @@ scp -J <your_user>@gate.cloudveneto.it -i ~/<path_to_your_.pem> ubuntu@10.67.22.
 ```
 
 *Repeat Phase 2 and Phase 3 for all required trials in the table.*
+
+---
+
+### Virtual Machines IP addresses:
+- **VM1**: `10.67.22.42`
+- **VM2**: `10.67.22.134`
+- **VM3**: `10.67.22.72`
+- **VM4**: `10.67.22.202`
+- **VM5**: `10.67.22.185`
+
