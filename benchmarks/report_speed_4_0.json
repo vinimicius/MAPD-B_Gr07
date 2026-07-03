@@ -1,0 +1,191 @@
+{
+    "target_rate_mb_s": 4.0,
+    "file_metrics": [
+        {
+            "file_id": "duck_00000",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.002743079006905,
+            "actual_throughput_mb_s": 3.9999562989740047
+        },
+        {
+            "file_id": "duck_00001",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.002755449007964,
+            "actual_throughput_mb_s": 3.9999532070400057
+        },
+        {
+            "file_id": "duck_00002",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.002915821998613,
+            "actual_throughput_mb_s": 3.9999131215664954
+        },
+        {
+            "file_id": "duck_00003",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.002774713997496,
+            "actual_throughput_mb_s": 3.999948391684041
+        },
+        {
+            "file_id": "duck_00004",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.002779242000543,
+            "actual_throughput_mb_s": 3.99994725989448
+        },
+        {
+            "file_id": "duck_00005",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.002850970005966,
+            "actual_throughput_mb_s": 3.999929331324171
+        },
+        {
+            "file_id": "duck_00006",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.002840875997208,
+            "actual_throughput_mb_s": 3.999931854333805
+        },
+        {
+            "file_id": "duck_00007",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.002859493994038,
+            "actual_throughput_mb_s": 3.9999272007455757
+        },
+        {
+            "file_id": "duck_00008",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.002812822000124,
+            "actual_throughput_mb_s": 3.9999388664808464
+        },
+        {
+            "file_id": "duck_00009",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.002830851008184,
+            "actual_throughput_mb_s": 3.9999343600950237
+        },
+        {
+            "file_id": "duck_00010",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.002818641994963,
+            "actual_throughput_mb_s": 3.9999374117606448
+        },
+        {
+            "file_id": "duck_00011",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.002780111011816,
+            "actual_throughput_mb_s": 3.9999470426822676
+        },
+        {
+            "file_id": "duck_00012",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.003051237988984,
+            "actual_throughput_mb_s": 3.9998792747588645
+        },
+        {
+            "file_id": "duck_00013",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.002789612000925,
+            "actual_throughput_mb_s": 3.9999446678804857
+        },
+        {
+            "file_id": "duck_00014",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.002801741007715,
+            "actual_throughput_mb_s": 3.999941636201607
+        },
+        {
+            "file_id": "duck_00015",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.002807715005474,
+            "actual_throughput_mb_s": 3.9999401429859915
+        },
+        {
+            "file_id": "duck_00016",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.002811997008394,
+            "actual_throughput_mb_s": 3.9999390726893855
+        },
+        {
+            "file_id": "duck_00017",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.00280427299731,
+            "actual_throughput_mb_s": 3.999941003324367
+        },
+        {
+            "file_id": "duck_00018",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.00291228700371,
+            "actual_throughput_mb_s": 3.999914005135201
+        },
+        {
+            "file_id": "duck_00019",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.002909873990575,
+            "actual_throughput_mb_s": 3.999914608265826
+        },
+        {
+            "file_id": "duck_00020",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.002851786004612,
+            "actual_throughput_mb_s": 3.999929127364467
+        },
+        {
+            "file_id": "duck_00021",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.0028163149982,
+            "actual_throughput_mb_s": 3.9999379933983534
+        },
+        {
+            "file_id": "duck_00022",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.002806884003803,
+            "actual_throughput_mb_s": 3.999940350696862
+        },
+        {
+            "file_id": "duck_00023",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.002778209993267,
+            "actual_throughput_mb_s": 3.9999475178481063
+        },
+        {
+            "file_id": "duck_00024",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.00280168799509,
+            "actual_throughput_mb_s": 3.9999416494522504
+        },
+        {
+            "file_id": "duck_00025",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.00276442700124,
+            "actual_throughput_mb_s": 3.999950962955669
+        },
+        {
+            "file_id": "duck_00026",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.002939332000096,
+            "actual_throughput_mb_s": 3.999907245273305
+        },
+        {
+            "file_id": "duck_00027",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.00278201198671,
+            "actual_throughput_mb_s": 3.9999465675274544
+        },
+        {
+            "file_id": "duck_00028",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.002748399987468,
+            "actual_throughput_mb_s": 3.9999549689718585
+        },
+        {
+            "file_id": "duck_00029",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.002787060991977,
+            "actual_throughput_mb_s": 3.9999453055128305
+        },
+        {
+            "file_id": "duck_00030",
+            "total_bytes_sent": 67119636,
+            "duration_seconds": 16.002923669002485,
+            "actual_throughput_mb_s": 3.999911160216532
+        }
+    ]
+}
