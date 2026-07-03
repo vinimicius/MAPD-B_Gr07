@@ -114,7 +114,7 @@ def main():
         print(f"[ERROR] Dask Master initialization failed: {e}")
         sys.exit(1)
 
- # --- Initialize Resilient Kafka Consumer ---
+    # Initialize Kafka Consumer
     consumer = Consumer({
         'bootstrap.servers': KAFKA_BROKER,
         'group.id': f'dask-processor-{RUN_ID}',
@@ -124,14 +124,14 @@ def main():
     })
     consumer.subscribe([TOPIC_INPUT])
 
-# --- Initialize Kafka Results Producer ---
+    # Initialize Kafka Producer
     producer = Producer({
         'bootstrap.servers': KAFKA_BROKER,
         'linger.ms': 10,
         'message.max.bytes': 50000000
     })
 
- # --- Delivery Callback to Catch Silent Errors ---
+    # Delivery callback to catch delivery errors
     def delivery_report(err, msg):
         if err is not None:
             print(f"[ERROR] Message delivery failed: {err}")
@@ -139,11 +139,9 @@ def main():
     print(f"[INFO] Connecting to Kafka Broker at {KAFKA_BROKER}...")
     print("[INFO] Pipeline listening for incoming data stream...")
 
-    # --- Pipeline State Tracking ---
-    active_futures = set()         # keep references to futures 
-                                    # Dask cancels/releases futures without reference 
-    results_queue = queue.Queue()  # Feed by callbacks; drained by main loop
-                                    # cost O(1) per item, without scanning pending
+    # Pipeline State Tracking
+    active_futures = set()  # Retain references to prevent Dask garbage collection
+    results_queue = queue.Queue()
 
     global_average = None
     total_processed = 0
@@ -151,11 +149,11 @@ def main():
     end_signal_partitions = set()
     stream_ended = False
 
-    end_to_end_stats = new_latency_stats()       # send_time -> harvest_time  (W, latency end-to-end)
-    queue_wait_stats = new_latency_stats()        # send_time -> submit_time  (wait in Kafka/loop)
-    dask_overhead_stats = new_latency_stats()     # submit_time -> compute_start 
-    service_time_stats = new_latency_stats()      # compute_start -> compute_end (processing time)
-    transit_stats = new_latency_stats()           # compute_end -> harvest_time (result return time)
+    end_to_end_stats = new_latency_stats()
+    queue_wait_stats = new_latency_stats()
+    dask_overhead_stats = new_latency_stats()
+    service_time_stats = new_latency_stats()
+    transit_stats = new_latency_stats()
 
     snapshots = []
     pipeline_start_time = time.time()
@@ -204,7 +202,7 @@ def main():
                 except Exception as e:
                     print(f"[WARNING] Bypassed an unparseable frame packet: {e}")
 
-            # 2. Drains whats already over
+            # 2. Drain completed results
             while True:
                 try:
                     psd_result, send_time, submit_time, compute_start, compute_end, harvest_time = \
