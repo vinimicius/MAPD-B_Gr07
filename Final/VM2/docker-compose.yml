@@ -14,7 +14,7 @@ services:
       KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093'
       
       # CRITICAL: The address Kafka tells VM1 to connect to (Your VM2 IP)
-      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://10.67.22.212:9092'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://10.67.22.134:9092'
       
       # Single-node cluster settings
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1

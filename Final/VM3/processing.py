@@ -1,296 +1,307 @@
-import os
-import sys
-import time
 import json
+import sys
 import struct
-import scipy.fft
-import multiprocessing
-import gc
-from dask.distributed import Client, LocalCluster, performance_report
+import time
+import pickle
+import os
+import math
+import queue
 import numpy as np
-import dask
-import dask.array as da
-from confluent_kafka import Consumer, Producer, KafkaError
-import matplotlib.pyplot
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+from functools import partial
+from confluent_kafka import Consumer, Producer
+from distributed import Client
 
-# Configuration
-KAFKA_BOOTSTRAP_SERVERS = os.environ.get('KAFKA_BOOTSTRAP_SERVERS', '10.67.22.212:9092')
-INPUT_TOPIC = 'topic_stream'     
-OUTPUT_TOPIC = 'topic_results'   
-TOTAL_FILES_EXPECTED = 31  
+# ==========================================
+# 1. CONFIGURATION & CLUSTER PARAMETERS
+# ==========================================
+DASK_SCHEDULER = 'tcp://10.67.22.72:8786' #VM3
+KAFKA_BROKER = '10.67.22.134:9092'        #VM2
+TOPIC_INPUT = 'topic_stream'
+TOPIC_RESULTS = 'topic_results'
+SAMPLE_RATE = 20e6
 
-FS = 2_000_000
-N_BINS = 2048
-N_DASK_CHUNKS = 4
+RUN_ID = os.environ.get('RUN_ID', 'default_run')
+SNAPSHOT_EVERY_N_CHUNKS = int(os.environ.get('SNAPSHOT_EVERY_N_CHUNKS', '50'))
 
-OUTPUT_DIR = "fft_results"  
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-def parse_message(raw_bytes: bytes):
-    header_len = struct.unpack('>I', raw_bytes[:4])[0]
-    header_json = raw_bytes[4:4 + header_len]
-    header = json.loads(header_json.decode('utf-8'))
+# ==========================================
+# 2. REMOTE WORKER COMPUTATION TASK
+# ==========================================
+def compute_fft(chunk_i, chunk_q):
+    """
+    This function executes remotely inside the RAM of VM4 and VM5.
+    It takes lists of numbers, builds complex numbers, and computes the power spectrum.
+    """
+    import numpy as np
+    import time
 
-    n_samples = header["n_samples"]
-    payload_start = 4 + header_len
-    bytes_per_array = n_samples * 4
+    compute_start = time.time()
+    # Reconstruct complex signal vector: V = I + j*Q
+    complex_signal = chunk_i + 1j * chunk_q
+    # Run the raw Fast Fourier Transform
+    fft_output = np.fft.fft(complex_signal)
+    # Calculate Power Intensity Magnitude Squared
+    power_spectrum = np.abs(fft_output) ** 2
+    compute_end = time.time()
 
-    i_bytes = raw_bytes[payload_start: payload_start + bytes_per_array]
-    q_bytes = raw_bytes[payload_start + bytes_per_array: payload_start + 2 * bytes_per_array]
+    return power_spectrum, compute_start, compute_end
 
-    arr_i = np.frombuffer(i_bytes, dtype='<f4')
-    arr_q = np.frombuffer(q_bytes, dtype='<f4')
 
-    return header, arr_i, arr_q
+# ==========================================
+# 3. ONLINE STATISTICS (WELFORD)
+# ==========================================
+def new_latency_stats():
+    return {"count": 0, "mean": 0.0, "M2": 0.0, "max": float("-inf"), "min": float("inf")}
 
-def process_file_batch_dask(scans_i: np.ndarray, scans_q: np.ndarray, client: Client):
-    signal = (scans_i + 1j * scans_q).astype(np.complex64).reshape(-1, N_BINS)
-    new_n_scans = signal.shape[0]
+def update_latency_stats(stats, x):
+    stats["count"] += 1
+    n = stats["count"]
+    delta = x - stats["mean"]
+    stats["mean"] += delta / n
+    delta2 = x - stats["mean"]
+    stats["M2"] += delta * delta2
+    stats["max"] = max(stats["max"], x)
+    stats["min"] = min(stats["min"], x)
 
-    # Scatter data to worker RAM to prevent graph bloat
-    [signal_future] = client.scatter([signal])
-    
-    signal_da = da.from_delayed(
-        dask.delayed(lambda x: x)(signal_future),
-        shape=signal.shape,
-        dtype=signal.dtype
-    ).rechunk((max(1, new_n_scans // N_DASK_CHUNKS), N_BINS))
-
-    spectra_da = signal_da.map_blocks(lambda chunk: scipy.fft.fft(chunk, axis=-1, workers=1), dtype=np.complex64)
-    power_da = (da.absolute(spectra_da) ** 2) / (N_BINS ** 2)
-
-    mean_power_da = da.mean(power_da, axis=0)
-    std_power_da = da.std(power_da, axis=0)
-
-    mean_power, std_power = dask.compute(mean_power_da, std_power_da)
-    freqs = np.fft.fftfreq(N_BINS, d=1 / FS)
-
+def finalize_latency_stats(stats):
+    n = stats["count"]
+    variance = stats["M2"] / n if n > 0 else None
     return {
-        "mean_power": mean_power.astype(np.float32),
-        "std_power": std_power.astype(np.float32),
-        "freqs": freqs.astype(np.float32),
-        "n_scans": new_n_scans, 
+        "count": n,
+        "mean_s": stats["mean"] if n > 0 else None,
+        "std_s": math.sqrt(variance) if variance is not None else None,
+        "max_s": stats["max"] if n > 0 else None,
+        "min_s": stats["min"] if n > 0 else None,
     }
 
-def update_global_average(global_state: dict, result: dict) -> dict:
-    M_n = result["n_scans"]
-    mean_n = result["mean_power"]
-    std_n = result["std_power"]
-    M2_n = M_n * std_n**2
 
-    if global_state["mean_power"] is None:
-        global_state["mean_power"] = mean_n.copy()
-        global_state["M2"] = M2_n.copy()
-        global_state["total_scans"] = M_n
-    else:
-        M_prev = global_state["total_scans"]
-        mean_prev = global_state["mean_power"]
-        M2_prev = global_state["M2"]
-        M_total = M_prev + M_n
-        delta = mean_n - mean_prev
+def compute_consumer_lag(consumer, partition_offsets):
+    total_lag = 0
+    for tp in consumer.assignment():
+        try:
+            low, high = consumer.get_watermark_offsets(tp, cached=False, timeout=1.0)
+            current = partition_offsets.get(tp.partition, low - 1)
+            total_lag += max(0, high - current - 1)
+        except Exception:
+            pass
+    return total_lag
 
-        global_state["mean_power"] = (M_prev * mean_prev + M_n * mean_n) / M_total
-        global_state["M2"] = M2_prev + M2_n + (delta**2) * (M_prev * M_n / M_total)
-        global_state["total_scans"] = M_total
 
-    global_state["files_count"] += 1
-    return global_state
-
-def save_benchmark_report(history):
-    """Generates an explicit performance summary and plotting map."""
-    report_path = os.path.join(OUTPUT_DIR, "benchmark_report.json")
-    plot_path = os.path.join(OUTPUT_DIR, "pipeline_performance.png")
-    
-    # Save raw structured metrics
-    with open(report_path, "w") as f:
-        json.dump(history, f, indent=4)
-    print(f"[INFO] Raw metrics saved successfully to {report_path}")
-    
-    # Extract structural lists for visualization
-    files = [h["file_id"] for h in history]
-    total_times = [h["total_time_s"] for h in history]
-    throughputs = [h["throughput_mb_s"] for h in history]
-    
-    # Render Matplotlib Dual Axis Benchmark Figure
-    fig, ax1 = plt.subplots(figsize=(14, 6))
-    
-    color = '#1f77b4'
-    ax1.set_xlabel('File Identifier (Chronological Input Window)', fontweight='bold', labelpad=10)
-    ax1.set_ylabel('Total Processing Latency (seconds)', color=color, fontweight='bold')
-    ax1.plot(files, total_times, color=color, marker='o', linewidth=2, label='Processing Time')
-    ax1.tick_params(axis='y', labelcolor=color)
-    ax1.axhline(y=4.2, color='r', linestyle='--', alpha=0.7, label='Max Real-Time Target (4.2s)')
-    ax1.set_ylim(0, max(total_times + [4.2]) + 0.5)
-    
-    ax2 = ax1.twinx()  
-    color = '#2ca02c'
-    ax2.set_ylabel('Effective Throughput (MB/s)', color=color, fontweight='bold')
-    ax2.plot(files, throughputs, color=color, marker='s', linestyle=':', linewidth=1.5, label='Throughput')
-    ax2.tick_params(axis='y', labelcolor=color)
-    ax2.axhline(y=16.0, color='orange', linestyle=':', alpha=0.7, label='Input Stream Speed (16 MB/s)')
-    
-    plt.title('QUAX Online Data Pipeline - High-Speed Benchmark Report', fontsize=14, fontweight='bold', pad=15)
-    ax1.set_xticklabels(files, rotation=45, ha='right')
-    fig.tight_layout()
-    
-    plt.savefig(plot_path, dpi=300)
-    plt.close(fig)
-    print(f"[INFO] Performance visualization matrix exported to {plot_path}")
-
-def main():
-    print("[INFO] Initializing processor I/Q FFT (Dask batch mode)...")
-    n_cores = multiprocessing.cpu_count()
-    cluster = LocalCluster(n_workers=1, threads_per_worker=n_cores, memory_limit='auto')
-    dask_client = Client(cluster)
-    
-    kafka_servers_str = KAFKA_BOOTSTRAP_SERVERS
-    if isinstance(KAFKA_BOOTSTRAP_SERVERS, list):
-        kafka_servers_str = ','.join(KAFKA_BOOTSTRAP_SERVERS)
-
-    print(f"[INFO] Using Kafka bootstrap servers: {kafka_servers_str}")
-    
-    consumer = Consumer({
-        'bootstrap.servers': kafka_servers_str,
-        'group.id': 'quax-processor-group',
-        'auto.offset.reset': 'latest',       
-        'fetch.message.max.bytes': 10485760, 
-        'queued.max.messages.kbytes': 32768  
-    })
-    consumer.subscribe([INPUT_TOPIC])
-
-    producer = Producer({
-        'bootstrap.servers': kafka_servers_str,
-        'message.max.bytes': 10485760
-    })
-    print("[INFO] Connected to Kafka successfully via confluent-kafka.")
-
-    buffers_i, buffers_q, scan_order, file_metadata = {}, {}, {}, {}
-    global_state = {"mean_power": None, "M2": None, "total_scans": 0, "files_count": 0}
-    
-    # --- ACCUMULATOR LIST FOR BENCHMARK EXPORT ---
-    benchmark_history = []
-
-    print("[INFO] Awaiting scans I/Q. Batch+Dask processing ACTIVE.")
-    
+# ==========================================
+# 4. CONCLUSION CALLBACK
+# ==========================================
+def handle_done(future, results_queue, active_futures, send_time, submit_time):
     try:
-        report_html_path = os.path.join(OUTPUT_DIR, "dask_performance_report.html")
-        with performance_report(filename=report_html_path):
+        psd_result, compute_start, compute_end = future.result()
+        harvest_time = time.time()
+        results_queue.put((psd_result, send_time, submit_time, compute_start, compute_end, harvest_time))
+    except Exception as e:
+        print(f"[WARNING] Future failed: {e}")
+    finally:
+        active_futures.discard(future)
+
+
+# ==========================================
+# 5. CORE ORCHESTRATION PIPELINE
+# ==========================================
+def main():
+    print(f"[INFO] Connecting to Dask Scheduler at {DASK_SCHEDULER}...")
+    try:
+        client = Client(DASK_SCHEDULER)
+        workers_count = len(client.scheduler_info()['workers'])
+        print(f"[SUCCESS] Connected! Active worker nodes in cluster: {workers_count}")
+    except Exception as e:
+        print(f"[ERROR] Dask Master initialization failed: {e}")
+        sys.exit(1)
+
+ # --- Initialize Resilient Kafka Consumer ---
+    consumer = Consumer({
+        'bootstrap.servers': KAFKA_BROKER,
+        'group.id': f'dask-processor-{RUN_ID}',
+        'auto.offset.reset': 'earliest',
+        'fetch.min.bytes': 1048576,
+        'message.max.bytes': 50000000
+    })
+    consumer.subscribe([TOPIC_INPUT])
+
+# --- Initialize Kafka Results Producer ---
+    producer = Producer({
+        'bootstrap.servers': KAFKA_BROKER,
+        'linger.ms': 10,
+        'message.max.bytes': 50000000
+    })
+
+ # --- Delivery Callback to Catch Silent Errors ---
+    def delivery_report(err, msg):
+        if err is not None:
+            print(f"[ERROR] Message delivery failed: {err}")
+
+    print(f"[INFO] Connecting to Kafka Broker at {KAFKA_BROKER}...")
+    print("[INFO] Pipeline listening for incoming data stream...")
+
+    # --- Pipeline State Tracking ---
+    active_futures = set()         # keep references to futures 
+                                    # Dask cancels/releases futures without reference 
+    results_queue = queue.Queue()  # Feed by callbacks; drained by main loop
+                                    # cost O(1) per item, without scanning pending
+
+    global_average = None
+    total_processed = 0
+    partition_offsets = {}
+    end_signal_partitions = set()
+    stream_ended = False
+
+    end_to_end_stats = new_latency_stats()       # send_time -> harvest_time  (W, latency end-to-end)
+    queue_wait_stats = new_latency_stats()        # send_time -> submit_time  (wait in Kafka/loop)
+    dask_overhead_stats = new_latency_stats()     # submit_time -> compute_start 
+    service_time_stats = new_latency_stats()      # compute_start -> compute_end (processing time)
+    transit_stats = new_latency_stats()           # compute_end -> harvest_time (result return time)
+
+    snapshots = []
+    pipeline_start_time = time.time()
+
+    try:
+        while True:
+            # 1. Kafka ingestion
+            msg = consumer.poll(0.1)
+
+            if msg is not None and not msg.error():
+                try:
+                    payload_bytes = msg.value()
+                    partition_offsets[msg.partition()] = msg.offset()
+
+                    header_len = struct.unpack('>I', payload_bytes[:4])[0]
+                    header_json_bytes = payload_bytes[4:4 + header_len]
+                    header_data = json.loads(header_json_bytes.decode('utf-8'))
+
+                    if header_data.get("event") == "END_OF_STREAM":
+                        end_signal_partitions.add(msg.partition())
+                        print(f"[INFO] END_OF_STREAM in partition {msg.partition()} "
+                              f"({len(end_signal_partitions)} partitions signaled)")
+                    else:
+                        n_samples = header_data["n_samples"]
+                        float_bytes_len = n_samples * 4
+                        start_i = 4 + header_len
+                        end_i = start_i + float_bytes_len
+                        start_q = end_i
+                        end_q = start_q + float_bytes_len
+
+                        # Arrays numpy float32 straight from the payload, copied to avoid memory issues
+                        chunk_i = np.frombuffer(payload_bytes[start_i:end_i], dtype=np.float32).copy()
+                        chunk_q = np.frombuffer(payload_bytes[start_q:end_q], dtype=np.float32).copy()
+
+                        submit_time = time.time()
+                        future = client.submit(compute_fft, chunk_i, chunk_q)
+                        active_futures.add(future)
+                        future.add_done_callback(
+                            partial(handle_done,
+                                    results_queue=results_queue,
+                                    active_futures=active_futures,
+                                    send_time=header_data["send_time"],
+                                    submit_time=submit_time)
+                        )
+
+                except Exception as e:
+                    print(f"[WARNING] Bypassed an unparseable frame packet: {e}")
+
+            # 2. Drains whats already over
             while True:
-                msg = consumer.poll(timeout=1.0)
-                
-                if msg is None: 
-                    continue
-                if msg.error():
-                    if msg.error().code() != KafkaError._PARTITION_EOF:
-                        print(f"[ERROR] Kafka Error: {msg.error()}")
-                    continue
+                try:
+                    psd_result, send_time, submit_time, compute_start, compute_end, harvest_time = \
+                        results_queue.get_nowait()
+                except queue.Empty:
+                    break
 
-                t_arrival = time.perf_counter()
-                raw_bytes = msg.value()
+                update_latency_stats(end_to_end_stats, harvest_time - send_time)
+                update_latency_stats(queue_wait_stats, submit_time - send_time)
+                update_latency_stats(dask_overhead_stats, compute_start - submit_time)
+                update_latency_stats(service_time_stats, compute_end - compute_start)
+                update_latency_stats(transit_stats, harvest_time - compute_end)
 
-                t_start_parse = time.perf_counter()
-                header, arr_i, arr_q = parse_message(raw_bytes)
-                t_end_parse = time.perf_counter()
+                if global_average is None:
+                    global_average = np.zeros_like(psd_result)
 
-                file_id = header["file_id"]
-                scan_id = header["scan_id"]
-                total_scans = header["total_scans"]
+                total_processed += 1
+                global_average = global_average + (psd_result - global_average) / total_processed
 
-                if file_id not in buffers_i:
-                    buffers_i[file_id] = [None] * total_scans
-                    buffers_q[file_id] = [None] * total_scans
-                    scan_order[file_id] = 0
-                    file_metadata[file_id] = {
-                        "total_scans": total_scans,
-                        "t_file_start": t_arrival,
-                        "bytes_processed": 0,
-                        "parse_times": [],
+                if total_processed % 10 == 0:
+                    shifted_avg = np.fft.fftshift(global_average)
+                    freqs = np.fft.fftfreq(len(global_average), d=1 / SAMPLE_RATE)
+                    shifted_freqs = np.fft.fftshift(freqs)
+                    decimated_freqs = shifted_freqs[::10]
+                    decimated_power = shifted_avg[::10]
+
+                    spectrum_payload = {
+                        "frequencies": decimated_freqs.tolist(),
+                        "power": decimated_power.tolist(),
+                        "total_chunks": total_processed,
+                        "max_power_intensity": float(np.max(shifted_avg)),
+                        "mean_power_intensity": float(np.mean(shifted_avg))
                     }
+                    producer.produce(TOPIC_RESULTS, value=json.dumps(spectrum_payload).encode('utf-8'),
+                                      callback=delivery_report)
+                    producer.poll(0)
+                    print(f"[UPDATE] Aggregated {total_processed} chunks. "
+                          f"Pending futures: {len(active_futures)}. Spectrum broadcasted.")
 
-                buffers_i[file_id][scan_id - 1] = arr_i
-                buffers_q[file_id][scan_id - 1] = arr_q
-                scan_order[file_id] += 1
+                if total_processed % SNAPSHOT_EVERY_N_CHUNKS == 0:
+                    now = time.time()
+                    try:
+                        dask_active_tasks = sum(len(v) for v in client.processing().values())
+                    except Exception:
+                        dask_active_tasks = None
 
-                file_metadata[file_id]["parse_times"].append(t_end_parse - t_start_parse)
-                file_metadata[file_id]["bytes_processed"] += (len(arr_i) + len(arr_q)) * 4
-
-                if scan_order[file_id] == total_scans:
-                    t_start_stack = time.perf_counter()
-                    scans_i = np.stack(buffers_i[file_id], axis=0)
-                    scans_q = np.stack(buffers_q[file_id], axis=0)
-                    t_end_stack = time.perf_counter()
-
-                    t_start_dask = time.perf_counter()
-                    result = process_file_batch_dask(scans_i, scans_q, dask_client)
-                    t_end_dask = time.perf_counter()
-
-                    t_file_end = time.perf_counter()
-                    m = file_metadata[file_id]
-                    total_time_latency = t_file_end - m["t_file_start"]
-                    total_mb = m["bytes_processed"] / (1024 * 1024)
-                    throughput_mb_s = total_mb / total_time_latency
-
-                    print("\n" + "=" * 60)
-                    print(f" BENCHMARK REPORT FOR RUN / FILE: {file_id}")
-                    print("=" * 60)
-                    print(f" Total samples processed      : {result['n_scans'] * N_BINS:,} samples I/Q")
-                    print(f" Raw Data Volume              : {total_mb:.2f} MB")
-                    print(f" Total Processing Time        : {total_time_latency:.4f} seconds (Target: < 4.2s)")
-                    print(f" Effective Throughput         : {throughput_mb_s:.2f} MB/s (Input Target: 16 MB/s)")
-                    print("-" * 60)
-                    print(" TIMING BREAKDOWN:")
-                    print(f"   Avg parsing per scan       : {np.mean(m['parse_times'])*1000:.3f} ms")
-                    print(f"   Stack scans -> matrix      : {(t_end_stack - t_start_stack)*1000:.3f} ms")
-                    print(f"   Dask FFT batch             : {(t_end_dask - t_start_dask)*1000:.3f} ms")
-                    print("=" * 60 + "\n")
-
-                    # --- APPEND LOG TO THE EXPORT HISTORY TREE ---
-                    benchmark_history.append({
-                        "file_id": file_id,
-                        "total_time_s": total_time_latency,
-                        "throughput_mb_s": throughput_mb_s,
-                        "parsing_ms": float(np.mean(m['parse_times'])*1000),
-                        "stacking_ms": float((t_end_stack - t_start_stack)*1000),
-                        "dask_fft_ms": float((t_end_dask - t_start_dask)*1000)
+                    snapshots.append({
+                        "timestamp": now,
+                        "elapsed_s": now - pipeline_start_time,
+                        "total_processed": total_processed,
+                        "pending_futures": len(active_futures),
+                        "consumer_lag": compute_consumer_lag(consumer, partition_offsets),
+                        "dask_active_tasks": dask_active_tasks,
                     })
 
-                    global_state = update_global_average(global_state, result)
-                    global_std_power = np.sqrt(global_state["M2"] / global_state["total_scans"])
-                    is_final = global_state["files_count"] >= TOTAL_FILES_EXPECTED
-
-                    output_payload = {
-                        "n_files_processed": global_state["files_count"],
-                        "n_scans_total": int(global_state["total_scans"]),
-                        "last_file_id": file_id,
-                        "averaged_power_spectrum": global_state["mean_power"].tolist(), 
-                        "std_power_spectrum": global_std_power.tolist(),                
-                        "frequencies": result["freqs"].tolist(),
-                        "benchmark_throughput_mbs": throughput_mb_s,
-                        "is_final": is_final
-                    }
-                    
-                    producer.produce(OUTPUT_TOPIC, value=json.dumps(output_payload).encode('utf-8'))
-                    producer.poll(0)
-
-                    del buffers_i[file_id]
-                    del buffers_q[file_id]
-                    del scan_order[file_id]
-                    del file_metadata[file_id]
-                    gc.collect()
-
-                    if is_final:
-                        print(f"[INFO] All files processed ({global_state['files_count']}/{TOTAL_FILES_EXPECTED}). Executing automated metric report closure...")
-                        save_benchmark_report(benchmark_history)
-                        break
+            # 3. Stop condition: all partitions signaled end, and nothing pending
+            assignment = consumer.assignment()
+            if (assignment
+                    and len(end_signal_partitions) >= len(assignment)
+                    and len(active_futures) == 0
+                    and results_queue.empty()):
+                stream_ended = True
+                print("[INFO] All partitions signaled end of stream; processing queue empty.")
+                break
 
     except KeyboardInterrupt:
-        pass
+        print("\n[INFO] Intercepted termination signal. Powering down pipeline components...")
     finally:
+        results = {
+            "run_id": RUN_ID,
+            "stream_ended_naturally": stream_ended,
+            "num_partitions_assigned": len(consumer.assignment()) if consumer.assignment() else None,
+            "total_chunks_processed": total_processed,
+            "pipeline_start_time": pipeline_start_time,
+            "pipeline_end_time": time.time(),
+            "wall_clock_duration_s": time.time() - pipeline_start_time,
+            "end_to_end_latency": finalize_latency_stats(end_to_end_stats),
+            "queue_wait": finalize_latency_stats(queue_wait_stats),
+            "dask_scheduling_overhead": finalize_latency_stats(dask_overhead_stats),
+            "service_time": finalize_latency_stats(service_time_stats),
+            "result_transit": finalize_latency_stats(transit_stats),
+            "snapshots": snapshots,
+        }
+
+        metrics_filename = f"processing_metrics_{RUN_ID}.pkl"
+        with open(metrics_filename, "wb") as f:
+            pickle.dump(results, f)
+
+        print(f"\n[METRICS] Processing metrics exported to {metrics_filename}")
+        print(json.dumps({k: v for k, v in results.items() if k != 'snapshots'}, indent=2))
+
         consumer.close()
         producer.flush()
-        dask_client.close()
+        client.close()
+        print("[SUCCESS] Processing orchestrator closed cleanly.")
+
 
 if __name__ == "__main__":
     main()
+
